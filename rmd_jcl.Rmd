@@ -1,0 +1,187 @@
+---
+title: "Analysis of GSE87650 - updated"
+author: "James Lee"
+date: "03/01/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This document describes an analysis of a public CD8 transcriptome dataset from a cross-sectional cohort of ulcerative colitis and Crohn's patients. There are 2 separate analyses. In the first (supervised analysis), the dataset is clustered using the core signature described in Lee et al. JCI (2011) to determine whether similar subgroups of patients are present in this dataset. In the second (unsupervised analysis), a de novo analysis is performed - without any reference to the Lee et al. signature - in order to determine whether it would have been possible to discover a gene signature analogous to the CD8 T cell exhaustion signature in this dataset. 
+
+First, we will import the normalised data directly from GEO and run a quick QC to check everything looks correct:
+
+```{r memory, include=FALSE}
+memory.limit(size=12000)
+setwd('C:/Users/James Lee/Dropbox/r_analysis/GSE87650')
+```
+
+
+```{r start, message=FALSE, warning=FALSE}
+
+library(GEOquery)
+library(genefilter)
+library(RColorBrewer)
+library(readxl)
+library(limma)
+library(tidyr)
+library(dplyr)
+library(fgsea)
+library(gplots)
+library(pheatmap)
+library(illuminaHumanv4.db)
+library(hugene10sttranscriptcluster.db)
+library(WGCNA)
+library(gdata)
+rawdata = getGEO("GSE87650")
+data = rawdata[[1]]
+data= data[,pData(data)$`cell type:ch1` == "CD8"]
+```
+
+```{r checks, results='asis'}
+boxplot(exprs(data), outline = F)
+pca = prcomp(t(exprs(data)))
+names(pData(data))[46] = "SimpleDiagnosis"
+groupColours = pData(data)$SimpleDiagnosis
+groupColours = rep("red", length(groupColours))
+groupColours[pData(data)$SimpleDiagnosis == "HC"] = "black"
+groupColours[pData(data)$SimpleDiagnosis == "CD"] = "blue"
+plot(pca$x[,1], pca$x[,2], pch = 19, col = groupColours)
+data = data[, pca$x[,1] < 40]
+ibd = data[,pData(data)$SimpleDiagnosis != "HC"]
+
+```
+
+The PCA plot highlights that 3 samples in the downloaded data are probably not from CD8 T cells. These samples were also identified and excluded from the Gasparetto et al. manuscript. These were removed to leave a normalised dataset containing 38 samples. 
+
+We will next import the core signature from Lee et al. and use this to subset the GSE87650 dataset. The resulting dataset will then be clustered to determine whether any patient subgroups are detectable. 
+
+```{r sup.clust, results='asis'}
+sig = read.csv("IBD1_IBD2_gene_signature.csv", header=T,row.names=2)
+ibd_sig=sig$`Gene.Symbol`
+ibd_sig = na.omit(ibd_sig)
+subsetData = ibd[fData(ibd)$Symbol %in% ibd_sig,]
+d = dist(t(exprs(subsetData)))
+subsetClust = hclust(d, method = "ward.D")
+disease = factor(pData(subsetData)$SimpleDiagnosis)
+diseaseColour = c("orange","purple")[disease]
+diagnosis=as.data.frame(subsetData$SimpleDiagnosis)
+rownames(diagnosis)=colnames(subsetData)
+colnames(diagnosis)="Diagnosis"
+hmcols=colorRampPalette(c("darkblue",'black','yellow'))(11)
+breakslist=seq(-1.5,1.5,by=0.3)
+pheatmap(subsetData,scale="row",color=hmcols,breaks=breakslist,clustering_method = 'ward.D', clustering_distance_cols = 'euclidean', show_rownames=F,cluster_cols=subsetClust,annotation_col=diagnosis,annotation_names_col=F,show_colnames=F,treeheight_col=100,cutree_cols=2)
+
+```
+
+This demonstrates that the expression of genes in the Lee et al. signature defines two main subgroups of patients in the GSE87650 dataset, with a mix of Crohn's disease and UC patients in each cluster. This is what the Gasparetto manuscript states that they were unable to do (“no clear clustering based on the expression of signature genes was observed in a total of n=38 adult IBD patients”).
+
+Importantly, this does not prove that the subgroups identified are analogous to those in Lee et al. as we cannot yet tell whether similar patterns of gene expression exist (i.e. are genes upregulated in IBD1 similarly upregulated in one of the two groups identified within GSE87650 and are genes upregulated in IBD2 upregulated in the other?) To assess this, we will perform gene set enrichment analysis to see how these two groups of genes are distributed between the two main patient subgroups identified:
+
+```{r gsea, results='asis', warning=FALSE, message=FALSE}
+groups = cutree(subsetClust, k = 2)
+groups=as.character(groups)
+groups=factor(groups)
+groupings = c("Group1","Group2")[groups]
+
+t.stat=apply(exprs(ibd),1, function(i) t.test(i~groupings)$statistic)
+rank = as_tibble(data.frame("Symbol" = fData(ibd)$Symbol, "stat" = t.stat))
+rank2 = rank %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat))
+ranks = tibble::deframe(rank2)
+ranks = ranks[order(ranks, decreasing = T)]
+
+ibd1.path = subset(sig, sig$`Subgroup.associated.with.increased.expression` == "IBD1")$`Gene.Symbol`
+ibd1.path = ibd1.path[ibd1.path != "NA"]
+ibd2.path = subset(sig, sig$`Subgroup.associated.with.increased.expression` == "IBD2")$`Gene.Symbol`
+ibd2.path = ibd2.path[ibd2.path != "NA"]
+paths = list("IBD1" = ibd1.path, "IBD2" = ibd2.path)
+
+fgseaRes = fgsea(paths, ranks, nperm = 1000)
+plotEnrichment(paths[["IBD1"]], stats = ranks)
+plotEnrichment(paths[["IBD2"]], stats = ranks)
+
+```
+
+This shows that IBD1-associated genes are enriched in cluster 1 (first figure) and that genes associated with IBD2 are enriched in cluster 2 (second figure). Accordingly, this confirms that the groups identified are analogous to the IBD1/IBD2 subgroups described in Lee et al. 
+
+Next, we sought to determine whether it would have been possible to 'rediscover' the IBD1/2 CD8 T cell signature in the GSE87650 dataset, without any reference to our published signature. To do this, we performed unsupervised hierarchical clustering on the entire dataset (all CD8 samples without any gene filtering).
+
+```{r unsupclust, results='asis'}
+d1 = dist(t(exprs(ibd)))
+ibdClust = hclust(d1, method = "ward.D")
+plotDendroAndColors(ibdClust,colors=diseaseColour,dendroLabels = F,groupLabels = "UC / CD")
+
+```
+
+There are two patient subgroups within the data, each containing a mixture of UC patients (orange) and CD patients (purple). The robust nature of these subgroups has separately been confirmed by consensus clustering. To identify the genes that are driving these subgroups, we will perform differential expression analysis between the subgroups using limma:
+
+```{r limma, results='markup'}
+groups = cutree(ibdClust, k = 2)
+groups=as.character(groups)
+groups=factor(groups)
+groupings = c("Group1","Group2")[groups]
+ibd$groupings=groupings
+
+design=model.matrix(~-1+factor(ibd$groupings))
+colnames(design)=c('A','B')
+fit=lmFit(ibd,design)
+matrix=makeContrasts(A-B,levels=design)
+fit2=contrasts.fit(fit,matrix)
+fit3=eBayes(fit2)
+res=decideTests(fit3,adjust.method='BH',p=0.05)
+summary(res)
+```
+
+So there are 4009 significantly differentially-expressed probesets between these 2 subgroups (FDR P < 0.05). We'll now map these probesets to genes, remove any that are unannotated or are duplicates for the same gene, and thereby generate a gene signature that is wholly derived from this dataset that can be used for clustering other independent datasets. 
+
+```{r jci, results='asis'}
+ibd_DEgenes_only=ibd[as.logical(res),]
+DEgenes=mget(featureNames(ibd_DEgenes_only),illuminaHumanv4SYMBOL,ifnotfound=NA)
+DEgenes=unlist(DEgenes)
+DEgenes2=na.omit(DEgenes)
+DEgenes3=DEgenes2[!duplicated(DEgenes2)]
+
+```
+
+We'll now examine whether this GSE87650-derived signature can be used to cluster other datasets by applying it to the UC and CD datasets in Lee et al. This will also facilitate a comparison of how the resulting clustering compares to the IBD1/IBD2 clustering. For this, we will import the final, normalised datasets that were used in Lee et al. and subset them by the GSE87650 signature genes before performing unsupervised hierarchical clustering:
+
+```{r jci2, results='asis'}
+load('JCI_CD8_final.RData')
+
+fData(CD_final_JCI)$SYMBOL=mget(featureNames(CD_final_JCI),hugene10sttranscriptclusterSYMBOL,ifnotfound=NA)
+fData(UC_final_JCI)$SYMBOL=mget(featureNames(UC_final_JCI),hugene10sttranscriptclusterSYMBOL,ifnotfound=NA)
+genes=mget(featureNames(UC_final_JCI),hugene10sttranscriptclusterSYMBOL,ifnotfound=NA)
+DEgenes4=intersect(DEgenes3,genes)
+CD_subset=CD_final_JCI[fData(CD_final_JCI)$SYMBOL %in% DEgenes4,]
+UC_subset=UC_final_JCI[fData(UC_final_JCI)$SYMBOL %in% DEgenes4,]
+CD_subset=CD_subset[!duplicated(fData(CD_subset)$SYMBOL)]
+UC_subset=UC_subset[!duplicated(fData(UC_subset)$SYMBOL)]
+cd_d1=dist(t(exprs(CD_subset)))
+CDclust_satsangi.sig = hclust(cd_d1, method = "ward.D")
+uc_d1=dist(t(exprs(UC_subset)))
+UCclust_satsangi.sig = hclust(uc_d1, method = "ward.D")
+CD_subset$col=ifelse(CD_subset$group==1,"red","darkblue")
+UC_subset$col=ifelse(UC_subset$group==1,"red","darkblue")
+plotDendroAndColors(CDclust_satsangi.sig, colors = CD_subset$col, groupLabels="IBD1 / IBD2", colorHeight = 0.5, dendroLabels=CD_subset$patient_number,main="CD samples clustered by GSE87650 signature")
+plotDendroAndColors(UCclust_satsangi.sig, colors = UC_subset$col, groupLabels="IBD1 / IBD2", colorHeight = 0.5, dendroLabels=UC_subset$patient_number,main="UC samples clustered by GSE87650 signature")
+```
+
+This data confirms that the GSE87650-derived signature largely recapitulates the IBD1/2 patient clustering, and is accordingly similarly prognostic (Kaplan-Meier plots have not been provided here but have been generated and show a significant association with time to treatment escalation). The probability of observing these clusterings (of IBD1/2) in either the UC or CD cohorts by chance is < 0.0001 (Fisher's exact test, two-tailed). To directly assess the extent of overlap between the signatures, we can use a hypergeometric test:
+
+```{r overlap, results='markup'}
+venn(list(DEgenes4,ibd_sig))
+table=matrix(c(944,3270,1755,13250-3270-1755+944),2,2)
+fisher.test(table)$p.value
+
+```
+
+
+Using the GSE87650 dataset, it is therefore not only possible to both cluster patients according to the published IBD1/2 signature - identifying analogous subgroups of patients - but also to re-discover this signature in an unsupervised analysis. This directly contradicts the conclusions in Gasparetto et al. manuscript, which states that no such clustering is present.    
+
+
+
