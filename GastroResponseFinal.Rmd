@@ -53,9 +53,7 @@ clinNew = read_xlsx(tmp.file, range = "A3:BI110", col_names=T)
 
 
 # Read in the IBD1/IBD2 gene lists provided to Matt
-tmp.file2 = tempfile(fileext = ".xls")
-download.file("IBD1_IBD2_gene_signature.xls", destfile = tmp.file2, mode = "wb")
-sig = read_xls(tmp.file2, range = "A2:F5228", col_names = T)
+sig = read_xls("IBD1_IBD2_gene_signature.xls", range = "A2:F5228", col_names = T)
 ibd1 = subset(sig, sig$`Subgroup associated with increased expression` == "IBD1")
 ibd1 = ibd1[ibd1$`Gene Symbol` != "NA",]
 ibd2 = subset(sig, sig$`Subgroup associated with increased expression` == "IBD2")
