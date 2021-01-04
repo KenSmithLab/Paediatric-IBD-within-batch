@@ -47,9 +47,7 @@ library(ConsensusClusterPlus)
 rawEset=ArrayExpress("E-MTAB-7923")
 
 # Read in Supplementary Table 1 which provides the IDs used in the final analysis
-tmp.file = tempfile(fileext = ".xlsx")
-download.file("https://www.biorxiv.org/content/biorxiv/early/2020/03/31/2020.03.30.015446/DC2/embed/media-2.xlsx?download=true", destfile = tmp.file, mode = "wb")
-clinNew = read_xlsx(tmp.file, range = "A3:BI110", col_names=T)
+clinNew = read_xlsx("media-2.xlsx", range = "A3:BI110", col_names=T)
 
 
 # Read in the IBD1/IBD2 gene lists provided to Matt
