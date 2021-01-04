@@ -1,0 +1,340 @@
+---
+title: "Re-analysis of the paediatric IBD dataset (E-MTAB-7923) from Gasparetto et al (Gastroenterology 2020, DOI: 10.1053/j.gastro.2020.08.017)"
+author: "PAL"
+date: "19/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+
+
+```{r message=FALSE}
+library(readxl)
+library(dplyr)
+library(oligo)
+library(ggvenn)
+library(ggpubr)
+library(ArrayExpress)
+library(affy)
+library(WGCNA)
+library(ggplot2)
+library(pheatmap)
+library(hugene20sttranscriptcluster.db)
+library(pd.hugene.2.0.st)
+library(data.table)
+library(rcompanion)
+library(sva)
+library(limma)
+library(tidyr)
+library(fgsea)
+library(cowplot)
+library(sva)
+library(magrittr)
+library(survival)
+library(survminer)
+library(RColorBrewer)
+library(gplots)
+library(ConsensusClusterPlus)
+```
+
+```{r message=FALSE, results='hide', warning=FALSE}
+# Read in the raw data from ArrayExpress
+rawEset=ArrayExpress("E-MTAB-7923")
+
+# Read in Supplementary Table 1 which provides the IDs used in the final analysis
+tmp.file = tempfile(fileext = ".xlsx")
+download.file("https://www.biorxiv.org/content/biorxiv/early/2020/03/31/2020.03.30.015446/DC2/embed/media-2.xlsx?download=true", destfile = tmp.file, mode = "wb")
+clinNew = read_xlsx(tmp.file, range = "A3:BI110", col_names=T)
+
+
+# Read in the IBD1/IBD2 gene lists provided to Matt
+tmp.file2 = tempfile(fileext = ".xls")
+download.file("IBD1_IBD2_gene_signature.xls", destfile = tmp.file2, mode = "wb")
+sig = read_xls(tmp.file2, range = "A2:F5228", col_names = T)
+ibd1 = subset(sig, sig$`Subgroup associated with increased expression` == "IBD1")
+ibd1 = ibd1[ibd1$`Gene Symbol` != "NA",]
+ibd2 = subset(sig, sig$`Subgroup associated with increased expression` == "IBD2")
+ibd2 = ibd2[ibd2$`Gene Symbol` != "NA",]
+ibd1.path = ibd1$`Gene Symbol`[order(ibd1$`CD P valueA`)][1:500]
+ibd2.path = ibd2$`Gene Symbol`[order(ibd2$`CD P valueA`)][1:500]
+paths = list("IBD1" = ibd1.path, "IBD2" = ibd2.path)
+
+# Subset the expression data to just those included in the Gastroenterology analysis and normalise the data
+gastroEset=rawEset[,sampleNames(rawEset) %in% clinNew$`Study ID Number`]
+normGastroData = oligo::rma(gastroEset, target = "core")
+```
+
+
+```{r fig.height=6, fig.width=8, fig.align="center", fig.cap="**Figure 1.** Following normalisation the 107 samples fall into two main clusters driven by batch."}
+# Cluster the normalised data to demonstrate the underlying batch structure
+batch = pData(normGastroData)$Characteristics.batch
+d = dist(t(exprs(normGastroData)))
+hc = hclust(d, method = "ward.D")
+norm.consensus=ConsensusClusterPlus(exprs(normGastroData), maxK = 3, innerLinkage = "ward.D", finalLinkage = "ward.D", reps = 1000, verbose = F, plot = "pdf", seed = 123)
+
+my.pal=colorRampPalette(c("white","darkblue"))(n=107)
+heatmap.2(norm.consensus[[2]]$consensusMatrix, Colv = as.dendrogram(norm.consensus[[2]]$consensusTree), scale = "none", labRow =  F, labCol = F, symm = F, ColSideColors = as.character(batch), dendrogram = "col", trace = "none", col = my.pal, density.info = "none")
+
+```
+
+```{r message= FALSE,  results='hide'}
+
+# Regress out the batch effect using the sva ComBat function
+eData=exprs(normGastroData)
+mod0=model.matrix(~1, data=pData(normGastroData))
+combat_eData=ComBat(eData, batch=batch, mod=mod0, par.prior=T, mean.only=F)
+
+d.combat = dist(t(combat_eData))
+hc.combat = hclust(d.combat, method = "ward.D")
+clust.combat=cutree(hc.combat, k=2)
+combat.clusters = factor(c("Cluster2","Cluster1")[clust.combat])
+```
+
+```{r results='hide', message=FALSE}
+
+# Check stablility of the clusters using consensus clustering of the combatted data
+combat.consensus=ConsensusClusterPlus(combat_eData, maxK = 3, innerLinkage = "ward.D", finalLinkage = "ward.D", reps = 1000, verbose = F, plot = "pdf", seed = 123)
+
+```
+
+```{r fig.height=6, fig.width=8, fig.align = 'center', fig.cap="**Figure 2.** ComBat successfully regresses out the batch structure but hierarchical clustering results in less stable clusters"}
+# Plot consensus plot
+my.pal=colorRampPalette(c("white","darkblue"))(n=107)
+heatmap.2(combat.consensus[[2]]$consensusMatrix, Colv = as.dendrogram(combat.consensus[[2]]$consensusTree), scale = "none", labRow =  F, labCol = F, symm = F, ColSideColors = as.character(batch), dendrogram = "col", trace = "none", col = my.pal, density.info = "none")
+
+```
+
+```{r}
+
+# Annotate the probesets by gene symbol to facilitate GSEA
+anno_eset = AnnotationDbi::select(hugene20sttranscriptcluster.db, keys=rownames(normGastroData), columns=c("GENENAME", "SYMBOL"), keytype="PROBEID")
+anno_eset=subset(anno_eset, !is.na(SYMBOL))
+anno_grouped <- group_by(anno_eset, PROBEID)
+anno_summarized <- dplyr::summarize(anno_grouped, no_of_matches = n_distinct(SYMBOL))
+anno_filtered <- filter(anno_summarized, no_of_matches > 1)
+probe_stats <- anno_filtered
+ids_to_exclude <- (featureNames(normGastroData) %in% probe_stats$PROBEID)
+annotGastro=subset(normGastroData, !ids_to_exclude)
+ids_to_include = featureNames(annotGastro) %in% anno_eset$PROBEID
+annotGastro=subset(annotGastro, ids_to_include)
+fData(annotGastro)$PROBEID <- rownames(fData(annotGastro))
+fData(annotGastro) <- left_join(fData(annotGastro), anno_eset)
+rownames(fData(annotGastro)) <- fData(annotGastro)$PROBEID
+
+```
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+
+# Normalise and cluster the samples on a per batch basis
+batches = sort(unique(pData(gastroEset)$Characteristics.batch))
+bat.data = lapply(batches, function(i) gastroEset[,pData(gastroEset)$Characteristics.batch == i])
+bat.norm = lapply(bat.data, function(i) oligo::rma(i, target = "core"))
+bat.d = lapply(bat.norm, function(i) dist(t(exprs(i))))
+bat.clust = lapply(bat.d, function(i) hclust(i, method = "ward.D"))
+bat.groups = lapply(bat.clust, function(i) cutree(i, k=2))
+escal = lapply(bat.norm, function(i) factor(pData(i)$Characteristics.number.of.treatment.escalations.))
+disease = lapply(bat.norm, function(i) factor(pData(i)$Characteristics.disease.))
+bat.annot=lapply(bat.norm, function(i) subset(i, !ids_to_exclude))
+ids_to_include = featureNames(bat.annot[[1]]) %in% anno_eset$PROBEID
+bat.annot2=lapply(bat.annot, function(i) subset(i, ids_to_include))
+
+for (i in 1:6) {
+  fData(bat.annot2[[i]])$PROBEID = rownames(fData(bat.annot2[[i]]))
+  fData(bat.annot2[[i]]) = left_join(fData(bat.annot2[[i]]), anno_eset, by = "PROBEID")
+  rownames(fData(bat.annot2[[i]])) = fData(bat.annot2[[i]])$PROBEID
+}
+```
+
+```{r fig.height=10, fig.width=8, fig.align='center', fig.cap="**Figure 3.** Hierarchical clustering of the individual batches identifies distinct clusters of patients independent of diagnosis. Red = CD, Blue = UC."}
+
+# Clustering of the individual batches
+layout(matrix(c(1,2,3,4,5,6,7,8,9,10,11,12), nrow = 12, ncol = 1), height=c(1,0.3,1,0.3,1,0.3,1,0.3,1,0.3,1,0.3))
+plotDendroAndColors(bat.clust[[1]], colors = c("red","blue")[disease[[1]]], setLayout = F, main = "Hierarchical clustering of batch 1", groupLabels = "Diagnosis")
+plotDendroAndColors(bat.clust[[2]], colors = c("red","blue")[disease[[2]]], setLayout = F, main = "Hierarchical clustering of batch 2", groupLabels = "Diagnosis")
+plotDendroAndColors(bat.clust[[3]], colors = c("red","blue")[disease[[3]]], setLayout = F, main = "Hierarchical clustering of batch 3", groupLabels = "Diagnosis")
+plotDendroAndColors(bat.clust[[4]], colors = c("red","blue")[disease[[4]]], setLayout = F, main = "Hierarchical clustering of batch 4", groupLabels = "Diagnosis")
+plotDendroAndColors(bat.clust[[5]], colors = c("red","blue")[disease[[5]]], setLayout = F, main = "Hierarchical clustering of batch 5", groupLabels = "Diagnosis")
+plotDendroAndColors(bat.clust[[6]], colors = c("red","blue")[disease[[6]]], setLayout = F, main = "Hierarchical clustering of batch 6", groupLabels = "Diagnosis")
+```
+
+```{r}
+# Use GSEA to look for enrichment of the IBD1 and IBD2 signatures in the individual batches
+set.seed(123)
+bat1.clusters=factor(c("Cluster2","Cluster1")[bat.groups[[1]]])
+bat1.rnk = apply(exprs(bat.annot2[[1]]),1, function(i) mean(i[bat1.clusters == "Cluster1"]-mean(i[bat1.clusters == "Cluster2"])))
+bat1.rnk2 = as_tibble(data.frame("Symbol" = fData(bat.annot2[[1]])$SYMBOL, "stat" = bat1.rnk))
+bat1.rnk3 = bat1.rnk2 %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat))
+bat1.rnk4 = tibble::deframe(bat1.rnk3)
+bat1.ranks = bat1.rnk4[order(bat1.rnk4, decreasing = T)]
+fgseaRes.bat1 = fgsea(paths, bat1.ranks, nperm = 1000)
+
+bat2.clusters=factor(c("Cluster1","Cluster2")[bat.groups[[2]]])
+bat2.rnk = apply(exprs(bat.annot2[[2]]),1, function(i) mean(i[bat2.clusters == "Cluster1"]-mean(i[bat2.clusters == "Cluster2"])))
+bat2.rnk2 = as_tibble(data.frame("Symbol" = fData(bat.annot2[[2]])$SYMBOL, "stat" = bat2.rnk))
+bat2.rnk3 = bat2.rnk2 %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat))
+bat2.rnk4 = tibble::deframe(bat2.rnk3)
+bat2.ranks = bat2.rnk4[order(bat2.rnk4, decreasing = T)]
+fgseaRes.bat2 = fgsea(paths, bat2.ranks, nperm = 1000)
+
+bat3.clusters=factor(c("Cluster1","Cluster2")[bat.groups[[3]]])
+bat3.rnk = apply(exprs(bat.annot2[[3]]),1, function(i) mean(i[bat3.clusters == "Cluster1"]-mean(i[bat3.clusters == "Cluster2"])))
+bat3.rnk2 = as_tibble(data.frame("Symbol" = fData(bat.annot2[[3]])$SYMBOL, "stat" = bat3.rnk))
+bat3.rnk3 = bat3.rnk2 %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat))
+bat3.rnk4 = tibble::deframe(bat3.rnk3)
+bat3.ranks = bat3.rnk4[order(bat3.rnk4, decreasing = T)]
+fgseaRes.bat3 = fgsea(paths, bat3.ranks, nperm = 1000)
+
+bat4.clusters = factor(c("Cluster2","Cluster1")[bat.groups[[4]]])
+bat4.rnk = apply(exprs(bat.annot2[[4]]),1, function(i) mean(i[bat4.clusters == "Cluster1"]-mean(i[bat4.clusters == "Cluster2"])))
+bat4.rnk2 = as_tibble(data.frame("Symbol" = fData(bat.annot2[[4]])$SYMBOL, "stat" = bat4.rnk))
+bat4.rnk3 = bat4.rnk2 %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat))
+bat4.rnk4 = tibble::deframe(bat4.rnk3)
+bat4.ranks = bat4.rnk4[order(bat4.rnk4, decreasing = T)]
+fgseaRes.bat4 = fgsea(paths, bat4.ranks, nperm = 1000)
+
+bat5.clusters = factor(c("Cluster2","Cluster1")[bat.groups[[5]]])
+bat5.rnk = apply(exprs(bat.annot2[[5]]),1, function(i) mean(i[bat5.clusters == "Cluster1"]-mean(i[bat5.clusters == "Cluster2"])))
+bat5.rnk2 = as_tibble(data.frame("Symbol" = fData(bat.annot2[[5]])$SYMBOL, "stat" = bat5.rnk))
+bat5.rnk3 = bat5.rnk2 %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat))
+bat5.rnk4 = tibble::deframe(bat5.rnk3)
+bat5.ranks = bat5.rnk4[order(bat5.rnk4, decreasing = T)]
+fgseaRes.bat5 = fgsea(paths, bat5.ranks, nperm = 1000)
+
+bat6.clusters = factor(c("Cluster2","Cluster1")[bat.groups[[6]]])
+bat6.rnk = apply(exprs(bat.annot2[[6]]),1, function(i) mean(i[bat6.clusters == "Cluster1"]-mean(i[bat6.clusters == "Cluster2"])))
+bat6.rnk2 = as_tibble(data.frame("Symbol" = fData(bat.annot2[[6]])$SYMBOL, "stat" = bat6.rnk))
+bat6.rnk3 = bat6.rnk2 %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat))
+bat6.rnk4 = tibble::deframe(bat6.rnk3)
+bat6.ranks = bat6.rnk4[order(bat6.rnk4, decreasing = T)]
+fgseaRes.bat6 = fgsea(paths, bat6.ranks, nperm = 1000)
+```
+
+```{r}
+# Generate enrichment plots for the IBD1 and IBD2 signatures in batches 1 to 6
+p1 = plotEnrichment(paths[["IBD1"]], stats = bat1.ranks) + labs(y="") + geom_text(x=10000, y=0.2, label = paste("Padj = ",round(fgseaRes.bat1$padj[1],3)), size = 4, fontface = 3)
+p2 = plotEnrichment(paths[["IBD2"]], stats = bat1.ranks) + labs(y="") + geom_text(x=5000, y=-0.15, label = paste("Padj = ",round(fgseaRes.bat1$padj[2],3)), size = 4, fontface = 3)
+p3 = plotEnrichment(paths[["IBD1"]], stats = bat2.ranks) + labs(y="") + geom_text(x=20000, y=0.2, label = paste("Padj = ",round(fgseaRes.bat2$padj[1],3)), size = 4, fontface = 3)
+p4 = plotEnrichment(paths[["IBD2"]], stats = bat2.ranks) + labs(y="") + geom_text(x=5000, y=0.1, label = paste("Padj = ",round(fgseaRes.bat2$padj[2],3)), size = 4, fontface = 3)
+p5 = plotEnrichment(paths[["IBD1"]], stats = bat3.ranks) + labs(y="") + geom_text(x=20000, y=0.2, label = paste("Padj = ",round(fgseaRes.bat3$padj[1],3)), size = 4, fontface = 3)
+p6 = plotEnrichment(paths[["IBD2"]], stats = bat3.ranks) + labs(y="") + geom_text(x=5000, y=-0.15, label = paste("Padj = ",round(fgseaRes.bat3$padj[2],3)), size = 4, fontface = 3)
+p7 = plotEnrichment(paths[["IBD1"]], stats = bat4.ranks) + labs(y="") + geom_text(x=20000, y=0.1, label = paste("Padj = ",round(fgseaRes.bat4$padj[1],3)), size = 4, fontface = 3)
+p8 = plotEnrichment(paths[["IBD2"]], stats = bat4.ranks) + labs(y="") + geom_text(x=5000, y=-0.2, label = paste("Padj = ",round(fgseaRes.bat4$padj[2],3)), size = 4, fontface = 3)
+p9 = plotEnrichment(paths[["IBD1"]], stats = bat5.ranks) + labs(y="") + geom_text(x=20000, y=0.25, label = paste("Padj = ",round(fgseaRes.bat5$padj[1],3)), size = 4, fontface = 3)
+p10 = plotEnrichment(paths[["IBD2"]], stats = bat5.ranks) + labs(y="") + geom_text(x=5000, y=-0.25, label = paste("Padj = ",round(fgseaRes.bat5$padj[2],3)), size = 4, fontface = 3)
+p11 = plotEnrichment(paths[["IBD1"]], stats = bat6.ranks) + labs(y="") + geom_text(x=20000, y=0.3, label = paste("Padj = ",round(fgseaRes.bat6$padj[1],3)), size = 4, fontface = 3)
+p12 = plotEnrichment(paths[["IBD2"]], stats = bat6.ranks) + labs(y="") + geom_text(x=5000, y=-0.1, label = paste("Padj = ",round(fgseaRes.bat6$padj[2],3)), size = 4, fontface = 3)
+```
+
+```{r  fig.height=10, fig.width=8, fig.align='center', fig.cap="**Figure 4.** Gene set enrichment for the IBD1 (A,C,E,G,I,K) and IBD2 (B,D,F,H,J,L) signatures in batches 1 (A,B), 2 (C,D), 3 (E,F) 4 (G,H), 5 (I,J) and 6 (K,L)."}
+# Plot the enrichment plots for batches 1-6
+plot_grid(p1,p2,p3,p4,p5,p6,p7,p8,p9,p10,p11,p12, ncol = 2, nrow = 6, labels=c("A","B","C","D","E","F","G","H","I","J","K","L"), hjust = -0.25)
+```
+
+```{r fig.height=10, fig.width=8, fIG.align='center', fig.cap = "**Figure 5.** The distribution of the IBD1/IBD2 subgroups is unbalanced across the 6 batches. Red = IBD1 and blue = IBD2."}
+layout(matrix(c(1,2,3,4,5,6,7,8,9,10,11,12), nrow = 12, ncol = 1), height=c(1,0.3,1,0.3,1,0.3,1,0.3,1,0.3,1,0.3))
+plotDendroAndColors(bat.clust[[1]], colors = c("red","blue")[bat1.clusters], setLayout = F, groupLabels = "IBD1/IBD2 subgroups", main = "Hierarchical clustering of batch 1")
+plotDendroAndColors(bat.clust[[2]], colors = c("red","blue")[bat2.clusters], setLayout = F, groupLabels = "IBD1/IBD2 subgroups", main = "Hierarchical clustering of batch 2")
+plotDendroAndColors(bat.clust[[3]], colors = c("red","blue")[bat3.clusters], setLayout = F, groupLabels = "IBD1/IBD2 subgroups", main = "Hierarchical clustering of batch 3")
+plotDendroAndColors(bat.clust[[4]], colors = c("red","blue")[bat4.clusters], setLayout = F, groupLabels = "IBD1/IBD2 subgroups", main = "Hierarchical clustering of batch 4")
+plotDendroAndColors(bat.clust[[5]], colors = c("red","blue")[bat5.clusters], setLayout = F, groupLabels = "IBD1/IBD2 subgroups", main = "Hierarchical clustering of batch 5")
+plotDendroAndColors(bat.clust[[6]], colors = c("red","blue")[bat6.clusters], setLayout = F, groupLabels = "IBD1/IBD2 subgroups", main = "Hierarchical clustering of batch 6")
+```
+
+```{r warning=FALSE}
+
+# Compare number of escalations between groups in each batch
+batch1_escalations = as.numeric(escal[[1]])
+batch2_escalations = as.numeric(escal[[2]])
+batch3_escalations = as.numeric(escal[[3]])
+batch4_escalations = as.numeric(escal[[4]])
+batch5_escalations = as.numeric(escal[[5]])
+batch6_escalations = as.numeric(escal[[6]])
+
+wilcox.test(batch1_escalations~bat1.clusters, alternative="greater")
+wilcox.test(batch2_escalations~bat2.clusters, alternative="greater")
+wilcox.test(batch3_escalations~bat3.clusters, alternative="greater")
+wilcox.test(batch4_escalations~bat4.clusters, alternative="greater")
+wilcox.test(batch5_escalations~bat5.clusters, alternative="greater")
+wilcox.test(batch6_escalations~bat6.clusters, alternative="greater")
+
+combined_escalations = c(batch1_escalations,batch2_escalations,batch3_escalations,batch4_escalations,batch5_escalations,batch6_escalations)
+combined_clusters = c(bat1.clusters,bat2.clusters,bat3.clusters,bat4.clusters,bat5.clusters,bat6.clusters)
+
+wilcox.test(combined_escalations~combined_clusters, alternative = "greater")
+```
+
+```{r fig.height= 5, fig.width=10, fig.align='center', fig.cap="**Figure 6.** Time to escalation in patients with IBD (A), CD (B) and UC(C), Red = IBD1, Blue = IBD2."}
+
+# Analysis of cluster associations with outcome measures
+extended.pheno=as.data.table(left_join(pData(normGastroData)[,c(4:5,10,29,31)], clinNew, by = c("Array.Data.File" = "Study ID Number")))
+extended.pheno$Cluster = clust.combat
+
+# Add original batch cluster information
+tmp = data.frame(clust.combat) %>% set_colnames("Group") %>% mutate(ID = names(clust.combat))
+bat.tmp = lapply(bat.groups, function(i) data.frame(i) %>% set_colnames("Group") %>% mutate(ID = names(i)))
+bat.tmp[[3]]$Group = ifelse(bat.tmp[[3]]$Group == 1, 2,1) # correct group inversion
+bat.tmp[[2]]$Group = ifelse(bat.tmp[[2]]$Group == 1, 2,1) # correct group inversion
+tmp.list = c(list(tmp), bat.tmp)
+clust.batch = tmp.list %>% purrr::reduce(left_join, by = "ID")
+clust.batch$combined = as.character(apply(clust.batch[,3:8], 1, function(i) paste(i[!is.na(i)])))
+extended.pheno$Batch.cluster = clust.batch$combined
+
+# Subdivide by diagnosis
+ex.pheno.CD=extended.pheno[Diagnosis == "CD",]
+ex.pheno.UC=extended.pheno[Diagnosis == "UC",]
+
+# Survival analysis
+# Time to 1st escalation CD
+cd.km.time=ex.pheno.CD$`Time to 1st escal (weeks)`
+cd.km.time[cd.km.time == "n.a."] = "78"
+cd.km.time[as.numeric(cd.km.time) > 78] = "78"
+cd.km.time = as.numeric(cd.km.time)
+cd.km.censor=ex.pheno.CD$`1st treatment escalation`
+cd.km.censor[ex.pheno.CD$`Time to 1st escal (weeks)` == 92] = 0
+cdSurv=Surv(cd.km.time, cd.km.censor)
+cd.fit=survfit(cdSurv~ex.pheno.CD$Batch.cluster)
+pCDFit1 = ggsurvplot(cd.fit, data =ex.pheno.CD, palette = c("blue","red"), ylab = "Escalation-free survival", xlab="Time (weeks)", legend = "none", title = "")
+survdiff(cdSurv~ex.pheno.CD$Batch.cluster)
+
+
+# Time to 1st escalation UC
+uc.km.time=ex.pheno.UC$`Time to 1st escal (weeks)`
+uc.km.time[uc.km.time == "n.a."] = "78"
+uc.km.time[as.numeric(uc.km.time) > 78] = "78"
+uc.km.time = as.numeric(uc.km.time)
+uc.km.censor=ex.pheno.UC$`1st treatment escalation`
+uc.km.censor[ex.pheno.UC$`Time to 1st escal (weeks)` == 94] = 0
+ucSurv=Surv(uc.km.time, uc.km.censor)
+uc.fit=survfit(ucSurv~ex.pheno.UC$Batch.cluster)
+pUCFit1 = ggsurvplot(uc.fit, data =ex.pheno.UC, palette = c("blue","red"), ylab = "Escalation-free survival", xlab="Time (weeks)", legend = "none", title = "")
+survdiff(ucSurv~ex.pheno.UC$Batch.cluster)
+
+# Time to 1st escalation IBD
+ibd.km.time=extended.pheno$`Time to 1st escal (weeks)`
+ibd.km.time[ibd.km.time == "n.a."] = "78"
+ibd.km.time[as.numeric(ibd.km.time) > 78] = "78"
+ibd.km.time=as.numeric(ibd.km.time)
+ibd.km.censor=extended.pheno$`1st treatment escalation`
+ibd.km.censor[ibd.km.time >= 78] = 0
+ibdSurv = Surv(ibd.km.time, ibd.km.censor)
+ibd.fit = survfit(ibdSurv~extended.pheno$Batch.cluster)
+pIBDFit1 = ggsurvplot(ibd.fit, data =extended.pheno, palette = c("blue","red"), ylab = "Escalation-free survival", xlab="Time (weeks)", legend = "none", title = "")
+survdiff(ibdSurv~extended.pheno$Batch.cluster)
+
+plot_grid(pIBDFit1[[1]], pCDFit1[[1]], pUCFit1[[1]], nrow = 1, ncol = 3, labels = c("A","B","C"))
+
+# Number of treatment escalations in CD patients
+wilcox.test(ex.pheno.CD$`Num of treatment escalations`~ex.pheno.CD$Batch.cluster, alternative = "less")
+
+# Number of treatment escalations in patients with UC
+wilcox.test(ex.pheno.UC$`Num of treatment escalations`~ex.pheno.UC$Batch.cluster, alternative = "less")
+
+# Number of treatment escalations in the combined cohort
+wilcox.test(extended.pheno$`Num of treatment escalations`~extended.pheno$Batch.cluster, alternative = "less")
+```
+
