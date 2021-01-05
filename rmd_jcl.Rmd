@@ -18,7 +18,6 @@ First, we will import the normalised data directly from GEO and run a quick QC t
 
 ```{r memory, include=FALSE}
 memory.limit(size=12000)
-setwd('C:/Users/James Lee/Dropbox/r_analysis/GSE87650')
 ```
 
 
