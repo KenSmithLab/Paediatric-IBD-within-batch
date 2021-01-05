@@ -1,4 +1,4 @@
-This repository contains the code we used to carry out the reanalyses described in our response to Gasparetto et al. “Transcription and DNA methylation patterns of blood-derived CD8+ T cells are associated with age and inflammatory bowel disease but do not predict prognosis.” Gastroenterology 160, 232-244 (2021). 
+This repository contains the code we used to carry out the reanalyses described in our response to Gasparetto et al. “Transcription and DNA methylation patterns of blood-derived CD8+ T cells are associated with age and inflammatory bowel disease but do not predict prognosis.” Gastroenterology 160, 232-244 (2021). Our concerns relating to the author's analyses of the paediatric IBD dataset are highlighted in the footnote we appended to the BioRxiv submission that preceded this publication (BioRxiv footnote Zilbauer et al 080620.pdf).
 
 GastroResponseFinal.Rmd contains the R code used to reanalyse the paediatric IBD dataset deposited in ArrayExpress under the accession number E-MTAB-7923.
 
