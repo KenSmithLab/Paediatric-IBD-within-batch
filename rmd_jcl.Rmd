@@ -62,8 +62,8 @@ The PCA plot highlights that 3 samples in the downloaded data are probably not f
 We will next import the core signature from Lee et al. and use this to subset the GSE87650 dataset. The resulting dataset will then be clustered to determine whether any patient subgroups are detectable. 
 
 ```{r sup.clust, results='asis'}
-sig = read.csv("IBD1_IBD2_gene_signature.csv", header=T,row.names=2)
-ibd_sig=sig$`Gene.Symbol`
+sig = read_xls("IBD1_IBD2_gene_signature.xls", range = "A2:F5228", col_names = T)
+ibd_sig=sig$`Gene Symbol`
 ibd_sig = na.omit(ibd_sig)
 subsetData = ibd[fData(ibd)$Symbol %in% ibd_sig,]
 d = dist(t(exprs(subsetData)))
@@ -95,9 +95,9 @@ rank2 = rank %>% distinct() %>% group_by(Symbol) %>% summarise(stat = mean(stat)
 ranks = tibble::deframe(rank2)
 ranks = ranks[order(ranks, decreasing = T)]
 
-ibd1.path = subset(sig, sig$`Subgroup.associated.with.increased.expression` == "IBD1")$`Gene.Symbol`
+ibd1.path = subset(sig, sig$`Subgroup associated with increased expression` == "IBD1")$`Gene Symbol`
 ibd1.path = ibd1.path[ibd1.path != "NA"]
-ibd2.path = subset(sig, sig$`Subgroup.associated.with.increased.expression` == "IBD2")$`Gene.Symbol`
+ibd2.path = subset(sig, sig$`Subgroup associated with increased expression` == "IBD2")$`Gene Symbol`
 ibd2.path = ibd2.path[ibd2.path != "NA"]
 paths = list("IBD1" = ibd1.path, "IBD2" = ibd2.path)
 
